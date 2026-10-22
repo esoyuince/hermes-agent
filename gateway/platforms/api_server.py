@@ -1116,7 +1116,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_chat_completions = _admit_api_agent_request(OpenAICompatRoutesMixin._handle_chat_completions)
     _handle_responses = _admit_api_agent_request(OpenAICompatRoutesMixin._handle_responses)
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: PlatformConfig, *, borrowed_stores=None):
+        self._borrowed_api_stores = borrowed_stores
+        if borrowed_stores is not None:
+            from gateway.platforms.api_server_borrowed import BorrowedAPIStores, require
+            from hermes_constants import get_hermes_home
+            require(type(borrowed_stores) is BorrowedAPIStores, 'borrowed_bundle_type')
+            borrowed_stores.claim(self, get_hermes_home())
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
         self._host, self._port = listen_address(extra)
@@ -1145,12 +1151,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         from hermes_constants import get_hermes_home
-        self._response_store = ResponseStore()  # this home's; a /p/<profile>/ route gets its own
+        self._response_store = (ResponseStore() if borrowed_stores is None
+                                else borrowed_stores.responses)
         self._response_store_home = str(get_hermes_home())
         self._response_stores: dict[str, ResponseStore] = {}
         self._response_store_lock = threading.Lock()
-        _api_runs._initialize_run_state(self, store_factory=RunIdempotencyStore)
-        self._session_db: Optional[Any] = None  # explicit override (tests/manual wiring)
+        _api_runs._initialize_run_state(self, store_factory=(RunIdempotencyStore
+            if borrowed_stores is None else lambda: borrowed_stores.replay))
+        self._session_db: Optional[Any] = (None if borrowed_stores is None
+                                           else borrowed_stores.state)
         self._session_dbs: dict[str, Any] = {}  # per-profile-home SessionDB cache
         self._session_db_cache_lock = threading.Lock()
         self._session_db_cache_closed = False
@@ -1778,6 +1787,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _current_response_store(self) -> ResponseStore:
         """Responses state of the routed profile's home. Conversation names are client-chosen, so one
         shared store let any profile's key read, chain onto and overwrite another's (#84253)."""
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            from hermes_constants import get_hermes_home
+            return self._borrowed_api_stores.select(self, get_hermes_home())[2]
         from hermes_constants import get_hermes_home
         home = get_hermes_home()
         if str(home) == self._response_store_home:
@@ -1793,6 +1805,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _open_and_cache_session_db(self, home) -> Optional[Any]:
         """Cached SessionDB for ``home`` (shared by both ``_ensure_session_db*``). Never writes
         ``self._session_db`` (explicit override only), so no profile pins later requests."""
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            return self._borrowed_api_stores.select(self, home)[0]
         if self.gateway_runner is not None:
             from gateway.platforms.api_server_store import selected_session_db
             return selected_session_db(self, home)
@@ -1837,6 +1851,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _ensure_session_db(self):
         """SessionDB for the active profile home (the runtime scope redirects ``get_hermes_home()``
         per profile). Sync, for ``_create_agent``; handlers use ``_ensure_session_db_async``."""
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            from hermes_constants import get_hermes_home
+            return self._borrowed_api_stores.select(self, get_hermes_home())[0]
         if self.gateway_runner is not None:
             from hermes_constants import get_hermes_home
             from gateway.platforms.api_server_store import selected_session_db
@@ -1853,6 +1870,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _ensure_session_db_async(self):
         """Async variant: the profile home is captured on the loop thread (its scope is invisible
         inside ``to_thread``), only the blocking open runs in the worker, single-flight locked."""
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            from hermes_constants import get_hermes_home
+            return self._borrowed_api_stores.select(self, get_hermes_home())[0]
         if self.gateway_runner is not None:
             from hermes_constants import get_hermes_home
             from gateway.platforms.api_server_store import selected_session_db
@@ -4438,6 +4458,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Start the aiohttp web server."""
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            from gateway.platforms.api_server_borrowed import BorrowedStoreRejected
+            raise BorrowedStoreRejected('borrowed_listener_not_qualified')
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
             return False
@@ -4570,6 +4593,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         failed reconnects and turns the whole gateway into a zombie (OSError: [Errno 24] Too many open
         files, #37011).
         """
+        if getattr(self, "_borrowed_api_stores", None) is not None:
+            from gateway.platforms.api_server_borrowed import disconnect_borrowed
+            return await disconnect_borrowed(self)
         self._mark_disconnected()
         # getattr: disconnect() tolerates bare __new__ fixtures (pinned in test_api_server_run_idempotency).
         routed = getattr(self, "_response_stores", {})

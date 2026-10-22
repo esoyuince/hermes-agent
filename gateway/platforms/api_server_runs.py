@@ -257,6 +257,8 @@ def _idempotency_capabilities(self, *, store_type) -> dict[str, Any]:
 
 
 def _close_run_state(self) -> None:
+    if getattr(self, "_borrowed_api_stores", None) is not None:
+        return  # caller owns the borrowed native replay connection
     try:
         if getattr(self, "_run_idempotency_store", None) is not None:
             self._run_idempotency_store.close()
