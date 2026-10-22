@@ -37,7 +37,14 @@ class ResponseStore:
     """
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: Optional[str] = None,
-                 max_identities: Optional[int] = None):
+                 max_identities: Optional[int] = None, *, canonical_state=None):
+        # Optional caller-owned state must be validated BEFORE opening this store.
+        # Do not route through SessionDB._read_ctx: it may open pooled readers
+        # or reopen a closed writer, which would defeat the borrowed lifecycle.
+        self._canonical_state = None
+        if canonical_state is not None:
+            from gateway.platforms.api_server_response_state import BorrowedResponseState
+            self._canonical_state = BorrowedResponseState(canonical_state, db_path)
         self._max_size = max_size
         self._max_identities = max_identities
         if db_path is None:
@@ -49,6 +56,9 @@ class ResponseStore:
         try:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
         except Exception:
+            if self._canonical_state is not None:
+                from gateway.platforms.api_server_response_state import CanonicalStateUnavailable
+                raise CanonicalStateUnavailable('response_store_disk_open_failed') from None
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
         # Shared WAL-fallback so response_store.db degrades gracefully on NFS/SMB/FUSE homes.
@@ -149,24 +159,29 @@ class ResponseStore:
             'SELECT a.admission_id, k.request_key FROM response_keys k JOIN response_admissions a '
             'ON a.request_key=k.request_key WHERE k.settled_at IS NULL').fetchall())
         state_db = Path(self._db_path).parent / 'state.db'
-        if not pending or not state_db.is_file():
+        if not pending or (self._canonical_state is None and not state_db.is_file()):
             return
         from hermes_state_holders import read_only_db_uri
         from hermes_state_terminal import ADMISSION_PREFIX
         terminal = []
         ids = list(pending)
         try:
-            with closing(sqlite3.connect(read_only_db_uri(state_db), uri=True)) as canon:
+            context = (self._canonical_state.read() if self._canonical_state is not None
+                       else closing(sqlite3.connect(read_only_db_uri(state_db), uri=True)))
+            with context as canon:
                 for start in range(0, len(ids), 500):
                     chunk = ids[start:start + 500]
                     marks = ','.join('?' * len(chunk))
                     terminal += [row[0] for row in canon.execute(
-                        f"SELECT admission_id FROM session_admissions WHERE status='terminal' "
+                        f"SELECT admission_id FROM main.session_admissions WHERE status='terminal' "
                         f"AND admission_id IN ({marks})", chunk)]
                     terminal += [row[0][len(ADMISSION_PREFIX):] for row in canon.execute(
-                        f'SELECT key FROM state_meta WHERE key IN ({marks})',
+                        f'SELECT key FROM main.state_meta WHERE key IN ({marks})',
                         [ADMISSION_PREFIX + admission_id for admission_id in chunk])]
         except sqlite3.Error:
+            if self._canonical_state is not None:
+                from gateway.platforms.api_server_response_state import CanonicalStateUnavailable
+                raise CanonicalStateUnavailable('response_canonical_query_failed') from None
             # Unreadable canonical store: nothing is proven terminal, so nothing is settled.
             logger.debug('Responses identity settlement skipped: %s unreadable', state_db, exc_info=True)
             return
