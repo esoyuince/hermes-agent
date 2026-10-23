@@ -1059,6 +1059,8 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     ``register=False`` builds a served secondary's authority without making it the runner's
     launch authority (``runner.session_authority``); the per-home registry owns the lookup.
     """
+    from gateway.run_borrowed_state import refuse_ordinary_service
+    refuse_ordinary_service(runner)
     if db is None:
         db = getattr(runner._session_db, '_db', runner._session_db)
     # Resolved off-loop before any state is published: the rest of the bring-up runs without

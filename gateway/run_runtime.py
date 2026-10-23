@@ -97,6 +97,9 @@ def _record_parked_profiles(parked):
 
 
 async def initialize_gateway_runtime(runner):
+    borrowed = getattr(runner, '_caller_owned_state', None)
+    if borrowed is not None:
+        return borrowed.initialize_authority(runner)
     from gateway.runtime_bootstrap import TicketStore
     from gateway.runtime_ownership import process_ownership
     from gateway.session_authorities import SessionAuthorities
@@ -363,6 +366,8 @@ def _authorities(runner):
 
 
 async def start_gateway_runtime_api(runner):
+    from gateway.run_borrowed_state import refuse_ordinary_service
+    refuse_ordinary_service(runner)
     from gateway.run_api import start_gateway_api
     from gateway.session_authorities import owner_scope
     runner.session_api = await start_gateway_api(runner)

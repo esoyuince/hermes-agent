@@ -38,10 +38,14 @@ class GatewayRuntimeInitMixin:
         """Build the SessionStore (with process-registry reset guard), its async facade and the router."""
         from gateway.run import (AsyncSessionStore, DeliveryRouter, SessionStore)
         from tools.process_registry import process_registry
+        borrowed = getattr(self, '_caller_owned_state', None)
+        options = {} if borrowed is None else {'session_db': borrowed.state_for_constructor(self)}
         self.session_store = SessionStore(
             self.config.sessions_dir, self.config,
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(
-                key))
+                key), **options)
+        if borrowed is not None:
+            borrowed.attach_session_store(self)
         # Loop-side boundary: sync helpers use ``session_store`` directly; async handlers await this facade.
         self._async_session_store = AsyncSessionStore(self.session_store)
         self.delivery_router = DeliveryRouter(self.config)
@@ -175,6 +179,10 @@ class GatewayRuntimeInitMixin:
         from gateway.session_db_recovery import RecoverableHandleCache
         self._session_db_handle_cache = RecoverableHandleCache(
             handles=self._session_db_handles, lock=self._session_db_handles_lock)
+        borrowed = getattr(self, '_caller_owned_state', None)
+        if borrowed is not None:
+            borrowed.initialize_search(self)
+            return  # Caller controls maintenance and state lifetime.
         try:
             self._open_session_db_for_active_scope(raise_on_error=True)
         except Exception as e:

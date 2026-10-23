@@ -3462,14 +3462,21 @@ class GatewayRunner(
     _platform_lock_takeover_on_start: bool = False
     _reconnect_watcher_task: Optional[asyncio.Task] = None
 
-    def __init__(self, config: Optional[GatewayConfig] = None):
+    def __init__(self, config: Optional[GatewayConfig] = None, *, caller_state=None):
         global _gateway_runner_ref
         # With multiplex_profiles on, load under the default profile secret scope so bot tokens in its
         # .env resolve as secondary profiles' do; explicit config= injection (tests) is left untouched.
         # See #64674.
         # Injected configs keep their mode (including None), except the launching profile's
         # standalone opt-out: --config must not turn that profile into a host multiplexer.
+        self._caller_owned_state = caller_state
+        if caller_state is not None:
+            from gateway.run_borrowed_state import CallerOwnedRunnerState, require
+            require(type(caller_state) is CallerOwnedRunnerState and config is caller_state.config,
+                    'runner_borrow_explicit_binding')
         self.config = config if config is not None else load_gateway_config_for_runner()
+        if caller_state is not None:
+            caller_state.claim(self)
         if config is not None:
             from hermes_cli.gateway_multiplex_mode import standalone_launcher_decision, log_multiplex_decision
             decision = standalone_launcher_decision(self.config)
@@ -3501,6 +3508,8 @@ class GatewayRunner(
         self._init_runtime_caches()
         self._init_session_db()
         self._init_registries_and_clocks()
+        if caller_state is not None:
+            caller_state.finish_construction(self)
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
         """AsyncSessionDB for the active profile scope, resolved per access (not in ``__init__``) since
@@ -3519,6 +3528,9 @@ class GatewayRunner(
         after recording that recoverable state so ``__init__`` can record ``_session_db_init_error`` for the
         #88235 broadcast.
         """
+        borrowed = getattr(self, '_caller_owned_state', None)
+        if borrowed is not None:
+            return borrowed.select_async(self)
         from hermes_state import AsyncSessionDB, _default_db_path
         from hermes_state_registry import acquire
         from gateway.session_db_recovery import RecoverableHandleCache
@@ -3565,12 +3577,18 @@ class GatewayRunner(
     def _session_db(self) -> Any:
         """The AsyncSessionDB for the active profile scope, or a pinned override (assigning
         ``runner._session_db`` pins it for every later read — tests install fakes/None this way)."""
+        borrowed = getattr(self, '_caller_owned_state', None)
+        if borrowed is not None:
+            return borrowed.select_async(self)
         if self._session_db_pinned is not _SESSION_DB_UNPINNED:
             return self._session_db_pinned
         return self._open_session_db_for_active_scope()
 
     @_session_db.setter
     def _session_db(self, value) -> None:
+        if getattr(self, '_caller_owned_state', None) is not None:
+            from gateway.run_borrowed_state import BorrowedRunnerRejected
+            raise BorrowedRunnerRejected('runner_borrow_cannot_repin')
         self._session_db_pinned = value
 
     def close_all_session_db_handles(self) -> None:
@@ -3581,6 +3599,9 @@ class GatewayRunner(
 
         See #98573.
         """
+        borrowed = getattr(self, '_caller_owned_state', None)
+        if borrowed is not None:
+            return borrowed.detach(self)
         def _close(db) -> None:
             if getattr(db, "__dict__", {}).get("_hermes_borrowed_handle"):
                 return

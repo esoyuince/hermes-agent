@@ -2045,6 +2045,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
     def _stop_quiesce_and_close_session_dbs(self, timeout: float, ctx: GatewayShutdownMixin._StopContext) -> None:
         """Quiesce the executor, then close SessionDB handles only if no worker is still live."""
+        from gateway.run_borrowed_state import refuse_ordinary_service
+        refuse_ordinary_service(self)
         from gateway.run import GatewayRunner, _EXECUTOR_QUIESCE_TIMEOUT
         # Quiesce the thread pool BEFORE closing session DBs: a late executor write after
         # SessionDB.close() checkpointed the WAL reopens the handle and splits the WAL generation
@@ -2202,6 +2204,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
+        from gateway.run_borrowed_state import refuse_ordinary_service
+        refuse_ordinary_service(self)
         from gateway.run import GatewayRunner
         # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
         # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
@@ -2244,6 +2248,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         self, *, restart: bool = False, detached_restart: bool = False, service_restart: bool = False
     ) -> None:
         """Stop the gateway and disconnect all adapters."""
+        from gateway.run_borrowed_state import refuse_ordinary_service
+        refuse_ordinary_service(self)
         from gateway.run import GatewayRunner
         # getattr-guard: shutdown-path tests build bare runners via object.__new__ that lack the
         # liveness-guard machinery.

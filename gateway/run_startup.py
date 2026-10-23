@@ -1622,6 +1622,8 @@ class GatewayStartupMixin:
 
     async def start(self) -> bool:
         """Start the gateway and all configured platform adapters."""
+        from gateway.run_borrowed_state import refuse_ordinary_service
+        refuse_ordinary_service(self)
         try:
             return await self._start_impl()
         finally:
@@ -1630,6 +1632,8 @@ class GatewayStartupMixin:
             await self._start_flush_runtime_status()
 
     async def _start_impl(self) -> bool:
+        from gateway.run_borrowed_state import refuse_ordinary_service
+        refuse_ordinary_service(self)
         logger.info("Starting Hermes Gateway...")
         self._start_install_faulthandler()
         await self._start_log_startup_environment()
