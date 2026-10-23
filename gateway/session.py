@@ -788,7 +788,11 @@ class SessionStore(
 ):
     """Session routing index + transcripts: SQLite (SessionDB), legacy JSONL fallback."""
 
-    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None):
+    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None, *, session_db=None):
+        self._borrowed_session_state = None
+        if session_db is not None:
+            from gateway.session_borrowed_state import CallerOwnedSessionState
+            self._borrowed_session_state = CallerOwnedSessionState(sessions_dir, config, session_db)
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: dict[str, SessionEntry] = {}
@@ -855,6 +859,8 @@ class SessionStore(
         except Exception:
             self._routing_home = None
         self._open_session_db_for_active_scope()
+        if self._borrowed_session_state is not None:
+            self._borrowed_session_state.attach(self)
 
     def _lazy(self, name: str, factory):
         """``self.<name>``, created via *factory* when missing/None (suites build bare stores via

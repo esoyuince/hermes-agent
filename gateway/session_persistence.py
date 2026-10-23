@@ -59,6 +59,9 @@ class SessionPersistenceMixin:
         Resolving here rather than once in ``__init__`` is the whole fix for #88532: it lets the scoping
         that the multiplexed inbound path already performs actually reach session storage.
         """
+        borrowed = getattr(self, '_borrowed_session_state', None)
+        if borrowed is not None:
+            return borrowed.select(path=db_path)
         from hermes_state import _default_db_path
         from hermes_state_registry import acquire
 
@@ -76,6 +79,9 @@ class SessionPersistenceMixin:
 
     def _pinned_db(self):
         """Return the explicitly pinned DB (``store._db = x``), else ``_DB_UNPINNED``."""
+        borrowed = getattr(self, '_borrowed_session_state', None)
+        if borrowed is not None:
+            return borrowed.select()
         return getattr(self, "_db_pinned", _DB_UNPINNED)
 
     @property
@@ -89,6 +95,9 @@ class SessionPersistenceMixin:
 
     @_db.setter
     def _db(self, value) -> None:
+        if getattr(self, '_borrowed_session_state', None) is not None:
+            from gateway.session_borrowed_state import BorrowedSessionRejected
+            raise BorrowedSessionRejected('session_borrow_cannot_repin')
         self._db_pinned = value
 
     @property
@@ -159,6 +168,9 @@ class SessionPersistenceMixin:
         drift apart on the same logical session until the routing index disagrees with the row and the
         #54878 self-heal drops a live conversation (#66887).
         """
+        borrowed = getattr(self, '_borrowed_session_state', None)
+        if borrowed is not None:
+            return borrowed.select(key=session_key)
         pinned = self._pinned_db()
         if pinned is not _DB_UNPINNED:
             return pinned
@@ -212,6 +224,10 @@ class SessionPersistenceMixin:
         """Close every SessionDB handle this store opened (one per path). Closing only ``store._db``
         would strand secondary profiles' handles with their WAL lock held ('database is locked' on
         restart). Drained under the lock, closed outside it; a pinned handle is the pinner's."""
+        borrowed = getattr(self, '_borrowed_session_state', None)
+        if borrowed is not None:
+            borrowed.detach(self)
+            return
         def _close(db) -> None:
             from hermes_state_registry import release_or_close  # shared instances no-op on close()
             try:
@@ -280,6 +296,10 @@ class SessionPersistenceMixin:
         sessions.json is the legacy import path for pre-migration installs (its entries are folded in for
         keys the DB doesn't have, then persisted to the DB on the next _save).
         """
+        borrowed = getattr(self, '_borrowed_session_state', None)
+        if borrowed is not None:
+            borrowed.load_routing(self)
+            return
         if self._loaded:
             self._reconcile_recovered_routing_locked()
             return
@@ -295,6 +315,9 @@ class SessionPersistenceMixin:
 
     def _import_legacy_sessions_json(self, db_had_entries: bool) -> None:
         """Legacy import: sessions.json fills only keys the DB lacks. Lock held."""
+        if getattr(self, '_borrowed_session_state', None) is not None:
+            from gateway.session_borrowed_state import BorrowedSessionRejected
+            raise BorrowedSessionRejected('session_borrow_legacy_import_disabled')
         from gateway.session import SessionEntry
         sessions_file = self.sessions_dir / "sessions.json"
         if not sessions_file.exists():
@@ -493,6 +516,9 @@ class SessionPersistenceMixin:
 
     def _save_sessions_json(self, data: dict[str, Any]) -> None:
         """Write the legacy sessions.json mirror of the routing index (atomic + fsync)."""
+        if getattr(self, '_borrowed_session_state', None) is not None:
+            from gateway.session_borrowed_state import BorrowedSessionRejected
+            raise BorrowedSessionRejected('session_borrow_json_fallback_disabled')
         atomic_json_write(self.sessions_dir / "sessions.json", {"_README": _SESSIONS_JSON_README, **data}, mode=0o600)
 
     def _save_entries(self) -> None:
@@ -537,6 +563,9 @@ class SessionPersistenceMixin:
                 logger.warning(
                     "gateway.session: single-entry routing save failed for %r (%s); falling back "
                     "to full index rewrite", session_key, exc)
+        if getattr(self, '_borrowed_session_state', None) is not None:
+            from gateway.session_borrowed_state import BorrowedSessionRejected
+            raise BorrowedSessionRejected('session_borrow_routing_write_failed')
         if entry_data is not None:
             # Full-snapshot fallback carrying the candidate transition.
             with guard:
