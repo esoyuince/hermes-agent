@@ -1,5 +1,7 @@
 """Durable ``/v1/runs`` admission, status, events, and control handlers."""
 
+from gateway.platforms import api_server_run_observation as _run_observation
+
 import asyncio
 import hashlib
 import json
@@ -215,6 +217,7 @@ def _uses_room_run_auth(self, request: web.Request) -> bool:
 
 def _initialize_run_state(self, *, store_factory) -> None:
     """Initialize adapter-owned durable and live ``/v1/runs`` state."""
+    self._run_observation_channel = None
     self._run_idempotency_store = store_factory()
     self._run_owner_pid = os.getpid()
     try:
@@ -527,6 +530,7 @@ class _RunLaunch:
     browser_control_transport_family: Any
     turn_author: Optional[dict[str, Any]] = None  # memory-attribution label only; grants nothing
     admission: Any = None
+    observation: Any = None  # producer identity, not execution authority
 
     @property
     def approval_session_key(self) -> str:
@@ -827,6 +831,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             idempotency_scope, idempotency_key, _openai_error)
         if refused is not None:
             return refused
+    launch.observation = _run_observation.prepare(
+        self, launch, idempotency_scope, idempotency_key, idempotency_fingerprint,
+        external_owner=admitted is not None)
     self._activate_admitted_request()
     if admitted is not None:
         task = self._active_run_tasks[run_id] = asyncio.create_task(
@@ -837,6 +844,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
+    _run_observation.created(launch, task)
     return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
@@ -958,6 +966,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
 
     run_id = run.run_id
     delivery_id = record["delivery_id"]
+    _run_observation.notify(run, "STARTED")
 
     def _finish(status: str, **fields: Any) -> None:
         if run_id in self._shutdown_interrupted_run_ids:
@@ -972,6 +981,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
         self._set_run_status(run_id, "running", delivery_id=delivery_id)
         record = await await_live_delivery(
             self, home, record, None, should_stop=lambda: run_id in self._stopping_run_ids)
+        _run_observation.notify(run, "EXECUTION_RETURNED")
         if record["status"] in ("queued", "claimed"):
             _finish("cancelled", completed=False, partial=False, interrupted=True)
             return
@@ -994,6 +1004,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
         with suppress(Exception):
             run.put_event(None)  # sentinel: close the SSE stream
         _retire_live_run(self, run_id)
+        _run_observation.notify(run, "RETIRED")
 
 
 async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
@@ -1001,6 +1012,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     _redact_api_error_text = _api_server._redact_api_error_text
     run_id, loop = run.run_id, asyncio.get_running_loop()
     _run_started_at = time.perf_counter()
+    _run_observation.notify(run, "STARTED")
 
     def _text_cb(delta: Optional[str]) -> None:
         if delta is None or run_id not in self._run_streams:
@@ -1077,6 +1089,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
             result, usage, served_runtime = await _submit_api_worker(
                 loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+        _run_observation.notify(run, "EXECUTION_RETURNED")
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
@@ -1115,6 +1128,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             loop.call_soon(run.put_event, None)  # close after the queued events
         _retire_live_run(self, run_id)
+        _run_observation.notify(run, "RETIRED")
 
 
 def _unregister_approval_notify(approval_session_key: Optional[str]) -> None:
