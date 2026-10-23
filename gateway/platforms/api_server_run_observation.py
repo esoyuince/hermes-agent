@@ -62,6 +62,8 @@ class RunLifecycleChannel:
         self._sequence = 0
         self._fault = None
         self._emitting = False
+        from gateway.platforms.api_server_worker_observation import WorkerBook
+        self._workers = WorkerBook(self)
         adapter._run_observation_channel = self
 
     def status(self):
@@ -138,6 +140,8 @@ class _RunObservation:
                 or task in a._background_tasks):
             self.channel._gap('run_observation_native_retirement_gap')
             return
+        from gateway.platforms.api_server_worker_observation import carrier_done
+        carrier_done(self, task)
         self.channel._emit('DONE', self.binding, task)
 
 

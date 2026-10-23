@@ -1,6 +1,7 @@
 """Durable ``/v1/runs`` admission, status, events, and control handlers."""
 
 from gateway.platforms import api_server_run_observation as _run_observation
+from gateway.platforms import api_server_worker_observation as _worker_observation
 
 import asyncio
 import hashlib
@@ -48,33 +49,67 @@ def api_worker_live_count() -> int:
         return _API_WORKER_LIVE
 
 
-def _submit_api_worker(loop, fn):
-    """``loop.run_in_executor(None, fn)`` with the worker-lifetime count held for the submission.
+def _submit_api_worker(loop, fn, *, observation=None):
+    """Hold native worker ownership through execution OR confirmed pre-start cancellation.
 
-    Increment on the submitting (handler) thread so the count is live before the worker can
-    exit; decrement in the worker thread's own ``finally`` so handler cancellation cannot drop
-    it early. When submission itself fails (default executor already shut down during quiesce
-    -> RuntimeError) the worker never runs, so the count is released here instead — a leaked
-    count would make the shutdown close gate skip the SessionDB close for the process lifetime.
+    Cancelling the asyncio Future can cancel queued executor work before _counted
+    ever runs. A single lock protects that handoff: cancellation releases only a
+    still-queued submission, whose callable then cannot enter. Once running, only
+    the worker's finally releases ownership, regardless of carrier cancellation.
     """
     global _API_WORKER_LIVE
+    ticket = _worker_observation.submitted(observation)
+    phase = "queued"
     with _API_WORKER_LOCK:
         _API_WORKER_LIVE += 1
 
     def _counted():
+        nonlocal phase
+        global _API_WORKER_LIVE
+        with _API_WORKER_LOCK:
+            if phase == "cancelled_before_start":
+                return None
+            phase = "running"
+        _worker_observation.report(ticket, 'RUNNING')
+        outcome = 'RAISED'
         try:
-            return fn()
+            result = fn()
+            outcome = 'RETURNED'
+            return result
         finally:
-            global _API_WORKER_LIVE
             with _API_WORKER_LOCK:
+                phase = "finished"
                 _API_WORKER_LIVE -= 1
+            _worker_observation.report(ticket, outcome)
+
+    def _cancel_queued(future):
+        nonlocal phase
+        global _API_WORKER_LIVE
+        if not future.cancelled():
+            return
+        released = False
+        with _API_WORKER_LOCK:
+            if phase == "queued":
+                phase = "cancelled_before_start"
+                _API_WORKER_LIVE -= 1
+                released = True
+        if released:
+            _worker_observation.report(ticket, 'CANCELLED_BEFORE_START')
 
     try:
-        return loop.run_in_executor(None, _counted)
+        future = loop.run_in_executor(None, _counted)
     except BaseException:
+        released = False
         with _API_WORKER_LOCK:
-            _API_WORKER_LIVE -= 1
+            if phase == "queued":
+                phase = "cancelled_before_start"
+                _API_WORKER_LIVE -= 1
+                released = True
+        if released:
+            _worker_observation.report(ticket, 'SUBMIT_FAILED')
         raise
+    future.add_done_callback(_cancel_queued)
+    return future
 _ROOM_RETENTION_REQUEST_KEY = (
     RequestKey("hermes.room_run_retention_until", float) if RequestKey is not None
     else "hermes.room_run_retention_until")
@@ -1088,7 +1123,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             self._active_run_agents[run_id] = agent
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
             result, usage, served_runtime = await _submit_api_worker(
-                loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+                loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server),
+                observation=run.observation)
         _run_observation.notify(run, "EXECUTION_RETURNED")
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
