@@ -28,7 +28,7 @@ class BorrowedAPIStores:
     real native objects and rejects changed handles, process or profile. No global
     protection against malicious same-process code constructing another bundle.
     """
-    def __init__(self, home, state, replay, responses):
+    def __init__(self, home, state, replay, responses, *, prepared_runner=None):
         from hermes_state import SessionDB
         from hermes_cli.sqlite_safe_read import TrackedConnection
         from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
@@ -69,6 +69,11 @@ class BorrowedAPIStores:
         self._state_lock = state._lock
         self._adapter = None
         self._stage = 'NEW'
+        self._prepared_runner = self._prepared_binding = None
+        self._prepared_adapter_ready = False
+        if prepared_runner is not None:
+            from gateway.platforms.api_server_prepared import bind_prepared_runner
+            bind_prepared_runner(self, prepared_runner)
 
     def _check(self):
         require((os.getpid(), threading.get_ident()) == self._actor, 'borrowed_actor')
@@ -97,7 +102,11 @@ class BorrowedAPIStores:
     def select(self, adapter, home):
         self._check();self._home(home)
         require(self._stage == 'ATTACHED' and self._adapter is adapter, 'borrowed_not_attached')
-        require(getattr(adapter,'gateway_runner',None) is None, 'borrowed_runner_conflict')
+        if self._prepared_runner is None:
+            require(getattr(adapter,'gateway_runner',None) is None, 'borrowed_runner_conflict')
+        else:
+            from gateway.platforms.api_server_prepared import check_prepared
+            check_prepared(self, adapter)
         require(adapter._session_db is self.state and adapter._response_store is self.responses
                 and adapter._run_idempotency_store is self.replay, 'borrowed_adapter_handles_changed')
         require(not adapter._session_dbs and not adapter._response_stores,
@@ -164,6 +173,9 @@ async def disconnect_borrowed(adapter):
         with adapter._session_db_cache_lock:
             adapter._session_db_cache_closed=True
         adapter._app=None
+        if bundle._prepared_runner is not None:
+            from gateway.platforms.api_server_prepared import check_prepared
+            check_prepared(bundle, adapter)
         bundle._stage='DETACHED'
     except BaseException:
         bundle._stage='CLOSE_UNKNOWN'

@@ -1200,6 +1200,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._metrics_latency_ms: list[float] = []
         self._metrics_last_request_at: Optional[float] = None
         self._metrics_last_heartbeat_at: Optional[float] = None
+        if borrowed_stores is not None and borrowed_stores._prepared_runner is not None:
+            from gateway.platforms.api_server_prepared import finish_adapter
+            finish_adapter(borrowed_stores, self)
 
     def active_agent_work_count(self) -> int:
         """All live agent work: pending admissions + in-flight turns + live /v1/runs tasks

@@ -4,6 +4,7 @@ This is a local, one-shot construction contract, not a listener/work capability.
 It never recovers, advances epochs, opens or closes caller SQLite, or releases a
 profile. Ordinary service startup/shutdown is deliberately not qualified here.
 """
+from pathlib import Path
 import os
 import threading
 
@@ -45,6 +46,7 @@ class CallerOwnedRunnerState:
         self._actor = (os.getpid(), threading.get_ident())
         self._runner = self._facade = self._wrapper = self._authority = None
         self._registry = self._descriptor = None
+        self._local_epochs = self._api_bundle = None
         self._stage = 'NEW'
         self._check_state(quiescent=True)
 
@@ -148,6 +150,13 @@ class CallerOwnedRunnerState:
                         'authority_epoch': self.epoch, 'runtime_protocol': 1,
                         'state': 'caller_prepared', 'capabilities': [], 'served_profiles': []},
                     'runner_borrow_descriptor_changed')
+            require(self._facade._local_authority_epochs is self._local_epochs
+                    and type(self._local_epochs) is dict
+                    and self._local_epochs == {Path(self.state.db_path): self.epoch}
+                    and all(type(v) is int for v in self._local_epochs.values())
+                    and type(self._facade._local_authority_epoch) is int
+                    and self._facade._local_authority_epoch == self.epoch,
+                    'runner_borrow_local_epoch_mapping_changed')
         except (AttributeError, KeyError, TypeError):
             raise BorrowedRunnerRejected('runner_borrow_prepared_identity_unavailable') from None
 
@@ -176,6 +185,12 @@ class CallerOwnedRunnerState:
         registry = SessionAuthorities(self.home, multiplexed=False)
         registry.add(self.home, authority)
         self._check_state(quiescent=True)
+        require('_local_authority_epoch' not in self._facade.__dict__
+                and '_local_authority_epochs' not in self._facade.__dict__,
+                'runner_borrow_local_epoch_already_present')
+        self._local_epochs = {Path(self.state.db_path): self.epoch}
+        self._facade._local_authority_epoch = self.epoch
+        self._facade._local_authority_epochs = self._local_epochs
         runner.session_authority, runner.session_authorities = authority, registry
         runner.session_runtime_descriptor = {'instance_id': self.instance_id,
             'authority_epoch': self.epoch, 'runtime_protocol': 1,
@@ -215,6 +230,9 @@ class CallerOwnedRunnerState:
                          '_managed_workers', '_mutation_tasks', 'pending_stops', 'pending_steers',
                          'cancel_obligations'):
                 require(not getattr(a, name, None), 'runner_borrow_authority_busy')
+        if self._api_bundle is not None:
+            from gateway.platforms.api_server_prepared import require_adapter_detached
+            require_adapter_detached(self._api_bundle, runner, self)
         try:
             self._facade.close_all_db_handles()
             if self._authority is not None:
