@@ -886,8 +886,11 @@ class GatewayAdapterLifecycleMixin:
         logger.warning("Reconnect %s: %s, removing from retry queue", platform.value, reason)
         del self._failed_platforms[platform]
 
-    def _publish_primary_adapter(self, platform, adapter) -> None:
+    def _publish_primary_adapter(self, platform, adapter, *, caller_bundle=None) -> dict | None:
         """Register a connected primary adapter and wire voice mode/input (transcription without /voice join)."""
+        if caller_bundle is not None or getattr(self, '_caller_owned_state', None) is not None:
+            from gateway.run_borrowed_publication import publish
+            return publish(caller_bundle, self, platform, adapter)
         self.adapters[platform] = adapter
         if platform == Platform.API_SERVER:
             from gateway.session_api_turn import recover_api_turns

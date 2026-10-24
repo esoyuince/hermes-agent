@@ -3753,6 +3753,8 @@ class GatewayRunner(
         return t("gateway.busy.action_restarting") if self._restart_requested else t("gateway.busy.action_shutting_down")
 
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
+        if getattr(self, "_caller_owned_state", None) is not None:
+            return  # Caller-owned mode has no qualified gateway_state.json writer lifecycle.
         if getattr(self, "_startup_cleanup_only", False):
             return  # cleanup of a start that never ran keeps its startup verdict (startup_failed)
         # ``active_work`` names each unit only while draining — that is when an observer (``hermes
@@ -3767,6 +3769,8 @@ class GatewayRunner(
         """Persist the live in-flight agent count to ``gateway_state.json`` at every turn boundary.
         Passes ONLY ``active_agents`` so the read-merge-write keeps lifecycle state (gateway_state=None
         would clobber it). Best-effort: a failed write must never disrupt a turn."""
+        if getattr(self, "_caller_owned_state", None) is not None:
+            return  # Native task ownership still updates; only default file persistence is absent.
         _write_runtime_status_quiet(active_agents=self._active_work_count())
 
     def _running_agent_ids(self) -> set:

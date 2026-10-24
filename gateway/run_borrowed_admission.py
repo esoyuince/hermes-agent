@@ -50,7 +50,11 @@ def _pair(bundle):
             and bundle._prepared_adapter_ready is True and adapter._borrowed_api_stores is bundle
             and adapter.gateway_runner is runner and type(binding._authority) is SessionAuthority,
             'admission_pair_changed')
+    from gateway.run_borrowed_publication import check_publication
+    check_publication(bundle)
     loop = asyncio.get_running_loop()
+    from gateway.run_borrowed_publication import require_owner_loop
+    require_owner_loop(bundle)
     require(binding._admission_loop is None or binding._admission_loop is loop,
             'admission_other_loop')
     return binding, runner, adapter, loop
@@ -65,7 +69,10 @@ def _idle_work(binding, runner, adapter, *, allow_idle_sessions=False):
     for owner, fields in ((runner, RUNNER_FIELDS), (binding._authority, AUTHORITY_FIELDS)):
         for name, kind in fields:
             value = getattr(owner, name, None)
-            if allow_idle_sessions and owner is binding._authority and name == 'sessions':
+            if owner is runner and name == 'adapters':
+                from gateway.run_borrowed_publication import check_publication
+                check_publication(binding._api_bundle)
+            elif allow_idle_sessions and owner is binding._authority and name == 'sessions':
                 require(type(value) is dict, 'admission_owned_work_retained')
             else:
                 require(type(value) is kind and not value, 'admission_owned_work_retained')
@@ -225,5 +232,7 @@ def require_open(binding, authority):
                 and all(s._conn is c for s,c in zip(bundle._stores,bundle._connections)),
                 'admission_stores_changed')
         binding._check_prepared(runner)
+        from gateway.run_borrowed_publication import check_publication
+        check_publication(bundle)
     except (BorrowedStoreRejected, BorrowedRunnerRejected, sqlite3.Error, AttributeError, TypeError, KeyError, ValueError):
         raise RuntimeStoreError('caller_admission_unavailable') from None

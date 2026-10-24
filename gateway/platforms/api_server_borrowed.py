@@ -69,6 +69,8 @@ class BorrowedAPIStores:
         self._state_lock = state._lock
         self._adapter = None
         self._stage = 'NEW'
+        self._publication_state = 'NEW'
+        self._publication_registry = self._publication_profiles = self._publication_loop = None
         self._prepared_runner = self._prepared_binding = None
         self._prepared_adapter_ready = False
         if prepared_runner is not None:
@@ -133,6 +135,13 @@ class BorrowedAPIStores:
         from gateway.run_borrowed_admission import finish_drain
         return finish_drain(self)
 
+    def publish_api_adapter(self):
+        """Publish this exact prepared adapter without starting transport or recovery."""
+        from gateway.config import Platform
+        require(self._prepared_runner is not None, 'publication_prepared_runner_required')
+        return self._prepared_runner._publish_primary_adapter(
+            Platform.API_SERVER, self._adapter, caller_bundle=self)
+
     def status(self):
         require((os.getpid(), threading.get_ident()) == self._actor, 'borrowed_actor')
         return {'state':self._stage,'callerOwnsStores':True,'storesClosedByAdapter':False,
@@ -168,6 +177,8 @@ async def disconnect_borrowed(adapter):
     bundle=adapter._borrowed_api_stores
     require((os.getpid(),threading.get_ident()) == bundle._actor, 'borrowed_actor')
     require(bundle._adapter is adapter, 'borrowed_adapter_mismatch')
+    from gateway.run_borrowed_publication import require_owner_loop
+    require_owner_loop(bundle)
     if bundle._stage == 'DETACHED':
         return
     bundle._check()
@@ -205,6 +216,8 @@ async def disconnect_borrowed(adapter):
             if bundle._prepared_binding._stage == 'DRAINED':
                 from gateway.run_borrowed_admission import assert_drained
                 assert_drained(bundle)
+        from gateway.run_borrowed_publication import withdraw
+        withdraw(bundle)
         bundle._stage='DETACHED'
     except BaseException:
         bundle._stage='CLOSE_UNKNOWN'

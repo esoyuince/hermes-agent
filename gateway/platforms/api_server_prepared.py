@@ -52,6 +52,8 @@ def _runner_check(bundle):
                 and binding._stage in ('PREPARED', 'ACTIVE', 'DRAINING', 'DRAINED'),
                 'prepared_runner_binding_changed')
         require(binding.select_async(runner)._db is bundle.state, 'prepared_runner_state_changed')
+        from gateway.run_borrowed_publication import check_publication
+        check_publication(bundle)
     except (BorrowedRunnerRejected, AttributeError, KeyError, TypeError):
         raise BorrowedStoreRejected('prepared_runner_unavailable') from None
 
