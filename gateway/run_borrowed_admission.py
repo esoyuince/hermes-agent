@@ -56,15 +56,19 @@ def _pair(bundle):
     return binding, runner, adapter, loop
 
 
-def _idle_work(binding, runner, adapter):
+def _idle_work(binding, runner, adapter, *, allow_idle_sessions=False):
     from gateway.platforms.api_server_borrowed import _quiescent
+    require(type(allow_idle_sessions) is bool, 'admission_idle_session_option')
     require(runner._running is False and runner._executor is None
             and runner._housekeeping_executor is None and runner._loop_heartbeat_task is None
             and runner._stop_task is None, 'admission_runner_lifecycle_active')
     for owner, fields in ((runner, RUNNER_FIELDS), (binding._authority, AUTHORITY_FIELDS)):
         for name, kind in fields:
             value = getattr(owner, name, None)
-            require(type(value) is kind and not value, 'admission_owned_work_retained')
+            if allow_idle_sessions and owner is binding._authority and name == 'sessions':
+                require(type(value) is dict, 'admission_owned_work_retained')
+            else:
+                require(type(value) is kind and not value, 'admission_owned_work_retained')
     for name, kind in LAZY_FIELDS:
         value = getattr(binding._authority, name, None)
         require(value is None or type(value) is kind and not value, 'admission_owned_work_retained')

@@ -123,6 +123,11 @@ class BorrowedAPIStores:
         from gateway.run_borrowed_admission import begin_drain
         return begin_drain(self)
 
+    def retire_idle_api_sessions(self):
+        """Release only idle API memory after sealing admission; retain durable data."""
+        from gateway.run_borrowed_retirement import retire_idle_api_sessions
+        return retire_idle_api_sessions(self)
+
     def finish_drain(self):
         """Require caller/native work retirement before ordinary ordered detach."""
         from gateway.run_borrowed_admission import finish_drain
