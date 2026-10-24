@@ -105,6 +105,36 @@ def _durable(authority, plan):
                 'retirement_durable_turn_marker')
 
 
+def _persisted_fast_entries(binding, store, plan):
+    """Verify per-entry UPSERT receipts against durable rows before memory retirement."""
+    fast = store._fast_persisted_entries
+    require(type(fast) is dict, 'retirement_fast_cache_type')
+    generations = (store._routing_generation, store._persisted_routing_generation)
+    require(all(type(v) is int and v >= 0 for v in generations), 'retirement_generation_type')
+    if not fast:
+        require(generations[0] == generations[1]
+                or getattr(binding, '_retired_routing_generations', None) == generations,
+                'retirement_routing_not_persisted')
+        return ()
+    require(getattr(binding, '_runtime_cleanup_state', None) == 'RETIRED',
+            'retirement_fast_cache_requires_runtime_retirement')
+    routes = {live.route: entry for _, live, entry in plan}
+    require(set(fast) <= set(routes), 'retirement_foreign_fast_entry')
+    for route, receipt in fast.items():
+        require(type(receipt) is tuple and len(receipt) == 2 and type(receipt[0]) is int
+                and generations[1] < receipt[0] <= generations[0] and type(receipt[1]) is str,
+                'retirement_fast_receipt_invalid')
+        saved = binding.state._conn.execute(
+            "SELECT entry_json FROM main.gateway_routing WHERE scope='' AND session_key=?",
+            (route,)).fetchone()
+        require(saved is not None and saved[0] == receipt[1]
+                and json.loads(receipt[1]) == routes[route].to_dict(),
+                'retirement_fast_receipt_not_durable')
+    require(max([generations[1]] + [receipt[0] for receipt in fast.values()]) == generations[0],
+            'retirement_routing_not_persisted')
+    return tuple(fast.items())
+
+
 def _retire_idle_api_sessions(bundle):
     from gateway.run_borrowed_admission import _pair, _idle_work, _idle_ledgers
     from gateway.platforms.api_server_prepared import check_prepared
@@ -123,19 +153,18 @@ def _retire_idle_api_sessions(bundle):
         for name in ('_save_lock', '_lock', '_inflight_lock', '_transcript_retry_lock',
                      '_transcript_drain_lock'):
             _take(getattr(store, name), acquired)
-        for name in ('_inflight_sessions', '_db_handles', '_fast_persisted_entries'):
+        for name in ('_inflight_sessions', '_db_handles'):
             _empty(store, name, dict)
         require(type(store._dirty_transcripts) is dict
                 and all(type(v) is list and not v for v in store._dirty_transcripts.values()),
                 'retirement_dirty_transcripts')
-        require(store._routing_generation == store._persisted_routing_generation,
-                'retirement_routing_not_persisted')
         pairs = tuple(authority.sessions.items())
         require(len({id(v) for _, v in pairs}) == len(pairs)
                 and len({v.route for _, v in pairs}) == len(pairs), 'retirement_alias')
         plan = tuple(_entry(authority, store, sid, live, loop, acquired) for sid, live in pairs)
         _take(authority.db._lock, acquired)
         _durable(authority, plan)
+        fast_plan = _persisted_fast_entries(binding, store, plan)
         # All checks precede effects. No callback, SQL write or await below.
         binding._stage = 'RETIRING_SESSIONS'
         try:
@@ -145,6 +174,12 @@ def _retire_idle_api_sessions(bundle):
                 del authority.sessions[sid]
                 del store._entries[live.route]
                 store._session_owner_hints.pop(sid, None)
+            for route, receipt in fast_plan:
+                require(store._fast_persisted_entries.get(route) is receipt,
+                        'retirement_fast_receipt_changed')
+                del store._fast_persisted_entries[route]
+            binding._retired_routing_generations = (store._routing_generation,
+                                                    store._persisted_routing_generation)
             binding._stage = 'DRAINING'
         except BaseException:
             binding._stage = 'ADMISSION_UNKNOWN'

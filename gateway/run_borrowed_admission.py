@@ -64,6 +64,8 @@ def _idle_work(binding, runner, adapter, *, allow_idle_sessions=False, runtime_c
     from gateway.platforms.api_server_borrowed import _quiescent
     require(type(allow_idle_sessions) is bool, 'admission_idle_session_option')
     require(type(runtime_cleanup) is bool, 'admission_runtime_cleanup_option')
+    require(getattr(binding, '_runtime_cleanup_state', 'NEW') in ('NEW', 'RETIRED'),
+            'admission_runtime_cleanup_unresolved')
     require(runner._running is False and (runtime_cleanup or runner._executor is None)
             and runner._housekeeping_executor is None and runner._loop_heartbeat_task is None
             and runner._stop_task is None, 'admission_runner_lifecycle_active')

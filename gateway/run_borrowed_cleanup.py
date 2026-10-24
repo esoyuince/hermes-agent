@@ -67,10 +67,23 @@ def _close_agents(agents):
         require(agent.close() is None, 'runtime_cleanup_agent_close_unconfirmed')
 
 
+def _sessions_idle(binding, loop):
+    from gateway.run_borrowed_retirement import _entry, _durable, _take, _empty
+    for name in ('api_observers', 'waiter_replies'):
+        _empty(binding._authority, name, dict, optional=True)
+    acquired = []
+    try:
+        plan = tuple(_entry(binding._authority, binding._facade, sid, live, loop, acquired)
+                     for sid, live in binding._authority.sessions.items())
+        _take(binding.state._lock, acquired)
+        _durable(binding._authority, plan)
+    finally:
+        for lock in reversed(acquired):lock.release()
+
+
 async def retire_idle_runtime(bundle):
     from gateway.run_borrowed_admission import _pair, _idle_work, _idle_ledgers
     from gateway.platforms.api_server_prepared import check_prepared
-    from gateway.run_borrowed_retirement import _entry, _durable, _take
     binding, runner, adapter, loop = _pair(bundle)
     require(binding._stage == 'DRAINING', 'runtime_cleanup_requires_drain')
     require(getattr(binding, '_runtime_cleanup_state', 'NEW') in ('NEW', 'RETIRED'),
@@ -79,25 +92,19 @@ async def retire_idle_runtime(bundle):
     _idle_work(binding, runner, adapter, allow_idle_sessions=True, runtime_cleanup=True)
     _idle_ledgers(bundle, binding)
     plan = runtime_plan(binding, runner)
-    acquired = []
+    _sessions_idle(binding, loop)
+    started = False
     try:
-        # Validate native session/observer/route/turn ownership before any close effect.
-        native_plan = tuple(_entry(binding._authority, binding._facade, sid, live, loop, acquired)
-                            for sid, live in binding._authority.sessions.items())
-        _take(binding.state._lock, acquired)
-        _durable(binding._authority, native_plan)
-    finally:
-        for lock in reversed(acquired):lock.release()
-    require(runner._executor_lock.acquire(blocking=False), 'runtime_cleanup_pool_owner_busy')
-    try:
-        _same_plan(binding, runner, plan)
-        binding._runtime_cleanup_state = 'CLOSING'
-        binding._runtime_cleanup_plan = plan
-        runner._executor_closing = True
-        binding._stage = 'RETIRING_RUNTIME'
-    finally:
-        runner._executor_lock.release()
-    try:
+        require(runner._executor_lock.acquire(blocking=False), 'runtime_cleanup_pool_owner_busy')
+        try:
+            _same_plan(binding, runner, plan)
+            started = True  # Everything below may have observable partial effects.
+            binding._runtime_cleanup_state = 'CLOSING'
+            binding._runtime_cleanup_plan = plan
+            runner._executor_closing = True
+            binding._stage = 'RETIRING_RUNTIME'
+        finally:
+            runner._executor_lock.release()
         pool, states, entries, agents = plan
         if pool is not None:
             # Existing native executor owns its shutdown and submission gate.
@@ -111,9 +118,11 @@ async def retire_idle_runtime(bundle):
                 'runtime_cleanup_phase_changed')
         # Native identity checks require the sealed known phase; no await follows.
         binding._stage = 'DRAINING'
+        binding._runtime_cleanup_state = 'RETIRED'  # Tentative, rechecked before releasing maps.
         check_prepared(bundle, adapter)
         _idle_work(binding, runner, adapter, allow_idle_sessions=True, runtime_cleanup=True)
         _idle_ledgers(bundle, binding)
+        _sessions_idle(binding, loop)
         for key, entry in entries:
             require(runner._agent_cache.get(key) is entry, 'runtime_cleanup_cache_changed')
             del runner._agent_cache[key]
@@ -126,8 +135,9 @@ async def retire_idle_runtime(bundle):
         binding._runtime_cleanup_plan = None
         binding._runtime_cleanup_task = None
     except BaseException:
-        binding._runtime_cleanup_state = 'UNKNOWN'
-        binding._stage = 'ADMISSION_UNKNOWN'
+        if started:
+            binding._runtime_cleanup_state = 'UNKNOWN'
+            binding._stage = 'ADMISSION_UNKNOWN'
         raise
     return {'state': 'IDLE_RUNTIME_RETIRED', 'agentCount': len(agents),
             'runnerSessionCount': len(states), 'callerStoresClosed': False,
