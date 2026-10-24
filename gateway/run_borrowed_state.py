@@ -47,6 +47,7 @@ class CallerOwnedRunnerState:
         self._runner = self._facade = self._wrapper = self._authority = None
         self._registry = self._descriptor = None
         self._local_epochs = self._api_bundle = None
+        self._admission_loop = None
         self._stage = 'NEW'
         self._check_state(quiescent=True)
 
@@ -133,22 +134,28 @@ class CallerOwnedRunnerState:
             return
         try:
             a, registry, descriptor = self._authority, self._registry, self._descriptor
+            phases = {'PREPARED': ('caller_prepared', True),
+                      'ACTIVE': ('caller_active', False),
+                      'DRAINING': ('caller_draining', True),
+                      'DRAINED': ('caller_drained', True)}
+            require(self._stage in phases, 'runner_borrow_phase_unknown')
+            description, retiring = phases[self._stage]
             require(runner.session_authority is a and runner.session_authorities is registry
                     and registry.launch is a and registry.for_home(self.home) is a
                     and len(registry) == 1 and registry.multiplexed is False,
                     'runner_borrow_authority_registry_changed')
             require(a.runner is runner and a.db is self.state and a.epoch == self.epoch
                     and a.instance_id == self.instance_id and a.profile_id == str(self.home)
-                    and a.retiring is True and a.retired is False,
+                    and a.retiring is retiring and a.retired is False,
                     'runner_borrow_authority_identity_changed')
-            require(runner._running is False and runner._draining is True,
+            require(runner._running is False and runner._draining is retiring,
                     'runner_borrow_not_prepared_only')
             require(runner.session_runtime_descriptor is descriptor and type(descriptor) is dict
                     and type(descriptor.get('authority_epoch')) is int
                     and type(descriptor.get('runtime_protocol')) is int
                     and descriptor == {'instance_id': self.instance_id,
                         'authority_epoch': self.epoch, 'runtime_protocol': 1,
-                        'state': 'caller_prepared', 'capabilities': [], 'served_profiles': []},
+                        'state': description, 'capabilities': [], 'served_profiles': []},
                     'runner_borrow_descriptor_changed')
             require(self._facade._local_authority_epochs is self._local_epochs
                     and type(self._local_epochs) is dict
@@ -163,7 +170,8 @@ class CallerOwnedRunnerState:
     def select_async(self, runner):
         require(runner is self._runner and runner._caller_owned_state is self
                 and runner.config is self.config and runner.session_store is self._facade
-                and self._stage in ('CONSTRUCTED', 'PREPARED'), 'runner_borrow_owner_changed')
+                and self._stage in ('CONSTRUCTED', 'PREPARED', 'ACTIVE', 'DRAINING', 'DRAINED'),
+                'runner_borrow_owner_changed')
         self._check_state()
         self._check_prepared(runner)
         return self._wrapper
@@ -206,6 +214,8 @@ class CallerOwnedRunnerState:
         require(runner is self._runner, 'runner_borrow_detach_owner')
         if self._stage == 'DETACHED':
             return
+        require(self._stage in ('CONSTRUCTED', 'PREPARED', 'DRAINED'),
+                'runner_borrow_admission_must_drain')
         self.select_async(runner)
         self._check_state(quiescent=True)
         # This stage never started workers/transports. Unknown work is retained,

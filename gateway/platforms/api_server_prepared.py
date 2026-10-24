@@ -49,7 +49,8 @@ def _runner_check(bundle):
     try:
         require(runner._caller_owned_state is binding and binding._api_bundle is bundle
                 and binding.state is bundle.state and binding.home == bundle.home
-                and binding._stage == 'PREPARED', 'prepared_runner_binding_changed')
+                and binding._stage in ('PREPARED', 'ACTIVE', 'DRAINING', 'DRAINED'),
+                'prepared_runner_binding_changed')
         require(binding.select_async(runner)._db is bundle.state, 'prepared_runner_state_changed')
     except (BorrowedRunnerRejected, AttributeError, KeyError, TypeError):
         raise BorrowedStoreRejected('prepared_runner_unavailable') from None
@@ -86,7 +87,8 @@ def check_prepared(bundle, adapter=None):
         require(adapter._running is False and adapter._app is None
                 and adapter._site is None and adapter._runner is None,
                 'prepared_api_service_state_changed')
-        _quiescent(adapter)
+        if bundle._prepared_binding._stage in ('PREPARED', 'DRAINED'):
+            _quiescent(adapter)
 
 
 def finish_adapter(bundle, adapter):
@@ -118,3 +120,6 @@ def require_adapter_detached(bundle, runner, binding):
             and adapter._site is None and adapter._runner is None and not adapter._running,
             'prepared_adapter_cleanup_incomplete')
     _quiescent(adapter)
+    if binding._stage == 'DRAINED':
+        from gateway.run_borrowed_admission import assert_drained
+        assert_drained(bundle)

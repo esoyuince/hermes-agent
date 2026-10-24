@@ -113,6 +113,21 @@ class BorrowedAPIStores:
                 'borrowed_foreign_cache')
         return self._stores
 
+    def activate_admission(self):
+        """Explicit local authority admission only; does not start a service."""
+        from gateway.run_borrowed_admission import activate
+        return activate(self)
+
+    def begin_drain(self):
+        """Withdraw new admission/claims; never cancel or delete existing work."""
+        from gateway.run_borrowed_admission import begin_drain
+        return begin_drain(self)
+
+    def finish_drain(self):
+        """Require caller/native work retirement before ordinary ordered detach."""
+        from gateway.run_borrowed_admission import finish_drain
+        return finish_drain(self)
+
     def status(self):
         require((os.getpid(), threading.get_ident()) == self._actor, 'borrowed_actor')
         return {'state':self._stage,'callerOwnsStores':True,'storesClosedByAdapter':False,
@@ -151,6 +166,12 @@ async def disconnect_borrowed(adapter):
     if bundle._stage == 'DETACHED':
         return
     bundle._check()
+    if bundle._prepared_binding is not None:
+        require(bundle._prepared_binding._stage in ('PREPARED', 'DRAINED'),
+                'borrowed_admission_must_drain')
+        if bundle._prepared_binding._stage == 'DRAINED':
+            from gateway.run_borrowed_admission import assert_drained
+            assert_drained(bundle)
     require(bundle._stage == 'ATTACHED', 'borrowed_cleanup_unknown_or_active')
     _quiescent(adapter)
     require(not any(c.in_transaction for c in bundle._connections), 'borrowed_transaction_active')
@@ -176,6 +197,9 @@ async def disconnect_borrowed(adapter):
         if bundle._prepared_runner is not None:
             from gateway.platforms.api_server_prepared import check_prepared
             check_prepared(bundle, adapter)
+            if bundle._prepared_binding._stage == 'DRAINED':
+                from gateway.run_borrowed_admission import assert_drained
+                assert_drained(bundle)
         bundle._stage='DETACHED'
     except BaseException:
         bundle._stage='CLOSE_UNKNOWN'

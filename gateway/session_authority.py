@@ -138,6 +138,10 @@ class SessionAuthority:
     def _require_admission_open(self):
         if self.runner._draining or self.retiring:
             raise RuntimeStoreError('runtime_draining')
+        borrowed = getattr(self.runner, '_caller_owned_state', None)
+        if borrowed is not None:
+            from gateway.run_borrowed_admission import require_open
+            require_open(borrowed, self)
 
     def _admission_gate(self, authorize=None):
         """The admission gate re-checked inside an off-loop write transaction (with the caller's
