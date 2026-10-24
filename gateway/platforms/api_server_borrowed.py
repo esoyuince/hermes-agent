@@ -125,6 +125,11 @@ class BorrowedAPIStores:
         from gateway.run_borrowed_admission import begin_drain
         return begin_drain(self)
 
+    async def retire_idle_runtime(self):
+        """Retire settled finite execution resources; never close caller stores."""
+        from gateway.run_borrowed_cleanup import retire_idle_runtime
+        return await retire_idle_runtime(self)
+
     def retire_idle_api_sessions(self):
         """Release only idle API memory after sealing admission; retain durable data."""
         from gateway.run_borrowed_retirement import retire_idle_api_sessions

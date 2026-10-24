@@ -291,8 +291,9 @@ async def _execution_scope(authority, home):
     (``home``) refines it. A single-profile gateway keeps its ambient scope byte-for-byte.
     Secret sources (external CLIs) hydrate off the loop, as main's per-message scope does (#99519)."""
     multiplex = getattr(getattr(authority.runner, 'config', None), 'multiplex_profiles', False)
+    from gateway.run_borrowed_goals import execution_scope
     if home is None and not multiplex:
-        return nullcontext()
+        return execution_scope(authority, nullcontext())
     from gateway.run import _load_profile_secret_scope, _profile_runtime_scope
 
     def load():
@@ -304,7 +305,8 @@ async def _execution_scope(authority, home):
         return scope_home, scope_home and _load_profile_secret_scope(scope_home)
 
     scope_home, secrets = await asyncio.to_thread(load)
-    return nullcontext() if scope_home is None else _profile_runtime_scope(scope_home, secrets)
+    profile = nullcontext() if scope_home is None else _profile_runtime_scope(scope_home, secrets)
+    return execution_scope(authority, profile)
 
 
 async def deliver_settled(authority, admission_id):

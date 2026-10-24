@@ -551,6 +551,11 @@ def _get_session_db() -> Optional[Any]:
         logger.debug("GoalManager: SessionDB bootstrap failed (%s)", exc)
         return None
 
+    from hermes_cli.goals_borrowed import current_session_db
+    borrowed = current_session_db()
+    if borrowed is not None:
+        return borrowed
+
     cached = _DB_CACHE.get(home)
     if cached is not None and _registry_tore_down(cached):
         # ``hermes profile delete`` force-closes every handle under the profile home
