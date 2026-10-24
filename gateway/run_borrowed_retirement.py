@@ -119,14 +119,16 @@ def _persisted_fast_entries(binding, store, plan):
     require(getattr(binding, '_runtime_cleanup_state', None) == 'RETIRED',
             'retirement_fast_cache_requires_runtime_retirement')
     routes = {live.route: entry for _, live, entry in plan}
+    scope = store._routing_scope()
+    require(scope == str(binding.home / 'sessions'), 'retirement_fast_scope_changed')
     require(set(fast) <= set(routes), 'retirement_foreign_fast_entry')
     for route, receipt in fast.items():
         require(type(receipt) is tuple and len(receipt) == 2 and type(receipt[0]) is int
                 and generations[1] < receipt[0] <= generations[0] and type(receipt[1]) is str,
                 'retirement_fast_receipt_invalid')
         saved = binding.state._conn.execute(
-            "SELECT entry_json FROM main.gateway_routing WHERE scope='' AND session_key=?",
-            (route,)).fetchone()
+            "SELECT entry_json FROM main.gateway_routing WHERE scope=? AND session_key=?",
+            (scope, route)).fetchone()
         require(saved is not None and saved[0] == receipt[1]
                 and json.loads(receipt[1]) == routes[route].to_dict(),
                 'retirement_fast_receipt_not_durable')
