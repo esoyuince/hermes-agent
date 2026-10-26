@@ -149,7 +149,7 @@ def activate(bundle):
 
 
 def begin_drain(bundle):
-    binding, runner, adapter, loop = _pair(bundle)
+    binding, runner, _adapter, _loop = _pair(bundle)
     require(binding._stage in ('ACTIVE', 'DRAINING'), 'admission_not_active_or_draining')
     binding._check_prepared(runner)
     if binding._stage == 'ACTIVE':
@@ -165,7 +165,9 @@ def begin_drain(bundle):
 
 def finish_drain(bundle):
     from gateway.platforms.api_server_prepared import check_prepared
-    binding, runner, adapter, loop = _pair(bundle)
+    binding, runner, adapter, _loop = _pair(bundle)
+    from gateway.platforms.api_server_borrowed_transport import require_transport_retired
+    require_transport_retired(bundle)
     require(binding._stage in ('DRAINING', 'DRAINED'), 'admission_drain_not_started')
     check_prepared(bundle, adapter)
     _idle_work(binding, runner, adapter)
@@ -185,6 +187,8 @@ def assert_drained(bundle):
     from gateway.platforms.api_server_prepared import check_prepared
     binding = bundle._prepared_binding
     binding._lifecycle_actor()
+    from gateway.platforms.api_server_borrowed_transport import require_transport_retired
+    require_transport_retired(bundle)
     require(binding._stage == 'DRAINED' and binding._api_bundle is bundle
             and bundle._stage in ('ATTACHED', 'DRAINING', 'DETACHED'),
             'admission_not_drained')
@@ -242,5 +246,7 @@ def require_open(binding, authority):
         binding._check_prepared(runner)
         from gateway.run_borrowed_publication import check_publication
         check_publication(bundle)
+        if bundle._borrowed_http_transport is not None:
+            bundle._borrowed_http_transport.check_binding(for_admission=True)
     except (BorrowedStoreRejected, BorrowedRunnerRejected, sqlite3.Error, AttributeError, TypeError, KeyError, ValueError):
         raise RuntimeStoreError('caller_admission_unavailable') from None

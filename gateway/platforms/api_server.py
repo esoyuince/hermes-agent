@@ -1367,13 +1367,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             },
         }
 
-    def _publish_runtime_status(self) -> None:
-        self._metrics_last_heartbeat_at = time.time()
-        self._write_runtime_status_safe(
-            "api_server_heartbeat",
-            platform_state="connected" if self.is_connected else "disconnected",
-            platform_metrics=self._api_server_status_payload(),
-        )
+    from gateway.platforms.api_server_metrics import publish_runtime_status as _publish_runtime_status
 
     def _record_api_metrics(self, usage: Optional[dict[str, Any]], latency_seconds: float) -> None:
         self._reset_metrics_if_needed()

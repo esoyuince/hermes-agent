@@ -86,9 +86,13 @@ def check_prepared(bundle, adapter=None):
                 and adapter.gateway_runner is bundle._prepared_runner
                 and adapter._borrowed_api_stores is bundle, 'prepared_adapter_changed')
         from gateway.platforms.api_server_borrowed import _quiescent
-        require(adapter._running is False and adapter._app is None
-                and adapter._site is None and adapter._runner is None,
-                'prepared_api_service_state_changed')
+        if bundle._borrowed_http_transport is None:
+            require(adapter._running is False and adapter._app is None
+                    and adapter._site is None and adapter._runner is None,
+                    'prepared_api_service_state_changed')
+        else:
+            from gateway.platforms.api_server_borrowed_transport import check_prepared_transport
+            check_prepared_transport(bundle, adapter)
         if bundle._prepared_binding._stage in ('PREPARED', 'DRAINED'):
             _quiescent(adapter)
 

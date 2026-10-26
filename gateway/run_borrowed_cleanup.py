@@ -51,7 +51,7 @@ def runtime_plan(binding, runner):
 
 
 def _same_plan(binding, runner, plan):
-    pool, states, entries, agents = plan
+    pool, states, entries, _agents = plan
     require(runner._executor is pool, 'runtime_cleanup_executor_replaced')
     require(len(runner._sessions) == len(states)
             and all(runner._sessions.get(key) is value for key, value in states),
@@ -85,6 +85,8 @@ async def retire_idle_runtime(bundle):
     from gateway.run_borrowed_admission import _pair, _idle_work, _idle_ledgers
     from gateway.platforms.api_server_prepared import check_prepared
     binding, runner, adapter, loop = _pair(bundle)
+    from gateway.platforms.api_server_borrowed_transport import require_transport_retired
+    require_transport_retired(bundle)
     require(binding._stage == 'DRAINING', 'runtime_cleanup_requires_drain')
     require(getattr(binding, '_runtime_cleanup_state', 'NEW') in ('NEW', 'RETIRED'),
             'runtime_cleanup_outcome_unknown')

@@ -141,6 +141,8 @@ def _retire_idle_api_sessions(bundle):
     from gateway.run_borrowed_admission import _pair, _idle_work, _idle_ledgers
     from gateway.platforms.api_server_prepared import check_prepared
     binding, runner, adapter, loop = _pair(bundle)
+    from gateway.platforms.api_server_borrowed_transport import require_transport_retired
+    require_transport_retired(bundle)
     require(binding._stage == 'DRAINING', 'retirement_requires_sealed_admission')
     check_prepared(bundle, adapter)
     _idle_work(binding, runner, adapter, allow_idle_sessions=True)

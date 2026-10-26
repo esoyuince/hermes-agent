@@ -43,6 +43,35 @@ def run_admission(adapter, run_id):
     return (authority, _row(rows[0])) if rows else None
 
 
+def _queued_cancellation_proof(authority, row, run_id):
+    """Prove that this canonical admission was cancelled before any claim.
+
+    A single SQLite statement samples the row, current epoch/instance and exact
+    managed-worker identity in one read snapshot. Native claims assign a positive
+    generation before dispatch; queued cancellation preserves NULL. This says
+    nothing about other admissions or physical workers on the same session.
+    """
+    if (row['status'], row['outcome'], row['generation']) != ('terminal', 'cancelled', None):
+        return None
+    with authority.db._read_ctx() as conn:
+        verified = conn.execute("""SELECT a.admission_id,a.target_session_id,r.epoch,r.instance_id
+            FROM session_admissions a JOIN runtime_epoch r ON r.singleton=1
+            WHERE a.admission_id=? AND a.request_id=? AND a.principal_id='api'
+              AND a.target_session_id=? AND a.status='terminal' AND a.outcome='cancelled'
+              AND a.generation IS NULL AND a.owner_epoch=?
+              AND r.epoch=? AND r.instance_id=?
+              AND NOT EXISTS (SELECT 1 FROM worker_executions w
+                  WHERE w.execution_id='admission-worker:' || a.admission_id)""",
+            (row['admission_id'], run_id, row['target_session_id'],
+             authority.epoch, authority.epoch, authority.instance_id)).fetchone()
+    if verified is None:
+        return None
+    return {'schema': 1, 'kind': 'canonical_queued_cancellation', 'run_id': run_id,
+            'admission_id': verified[0], 'session_id': verified[1],
+            'authority_epoch': verified[2], 'instance_id': verified[3],
+            'execution_generation': None, 'no_worker_started_verified': True}
+
+
 def run_projection(adapter, run_id):
     owned = run_admission(adapter, run_id)
     if owned is None:
@@ -70,9 +99,13 @@ def run_projection(adapter, run_id):
         pending = list(live.controls.snapshot(row['target_session_id'], row['generation']))
         if any(prompt.get('kind') == 'approval' for prompt in pending):
             status = 'waiting_for_approval'  # the documented run state main's run store reports
-    return {'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
+    projection = {'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
             'admission_id': row['admission_id'], 'execution_generation': row['generation'],
             'output': result.get('final_response', ''), 'usage': saved.get('usage', {}) if saved else {}}
+    proof = _queued_cancellation_proof(authority, row, run_id)
+    if proof is not None:
+        projection['execution_proof'] = proof
+    return projection
 
 
 async def send_clarify(adapter, *, chat_id, **kwargs):
@@ -131,7 +164,9 @@ async def stop_run(adapter, run_id):
                 raise
             authority, row = run_admission(adapter, run_id)
         else:
-            adapter._stopping_run_ids.add(run_id)
+            # Cancellation already settled the canonical row and its observer.
+            # Media release may yield until the producer has retired; adding a
+            # stop marker here would strand it after that producer's cleanup.
             waiter = authority.waiters.pop(row['admission_id'], None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(None)

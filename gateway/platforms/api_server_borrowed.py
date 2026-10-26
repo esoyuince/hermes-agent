@@ -1,8 +1,8 @@
 """Explicit, one-shot borrowed native API stores; no acquisition or release of DBs.
 
 Caller owns native construction/preflight, profile lease, connection lifetime and
-readiness policy. This seam is not proof of any of those. Borrowed API listeners
-remain disabled until the complete harness admission path is qualified.
+readiness policy. This seam is not proof of any of those. A listener requires the
+separate one-shot borrowed transport and a concrete embedding admission boundary.
 """
 from __future__ import annotations
 import asyncio
@@ -73,6 +73,7 @@ class BorrowedAPIStores:
         self._publication_registry = self._publication_profiles = self._publication_loop = None
         self._prepared_runner = self._prepared_binding = None
         self._prepared_adapter_ready = False
+        self._borrowed_http_transport = None
         if prepared_runner is not None:
             from gateway.platforms.api_server_prepared import bind_prepared_runner
             bind_prepared_runner(self, prepared_runner)
@@ -149,8 +150,13 @@ class BorrowedAPIStores:
 
     def status(self):
         require((os.getpid(), threading.get_ident()) == self._actor, 'borrowed_actor')
+        listener = False
+        if self._borrowed_http_transport is not None:
+            from gateway.platforms.api_server_borrowed_transport import listener_authorized
+            listener = listener_authorized(self)
         return {'state':self._stage,'callerOwnsStores':True,'storesClosedByAdapter':False,
-                'listenerAuthorized':False,'profileLeaseVerifiedHere':False,
+                'listenerAuthorized':listener,
+                'profileLeaseVerifiedHere':False,
                 'preparedResponseSchemaVerifiedHere':False}
 
 
@@ -177,7 +183,7 @@ async def disconnect_borrowed(adapter):
 
     Incomplete cleanup is terminal UNKNOWN and cannot be blindly retried. This
     does not release a profile/image lease or authorize the caller to ignore
-    unrelated writers. No HTTP listener can yet be started in borrowed mode.
+    unrelated writers. An opt-in HTTP transport must already be retired.
     """
     bundle=adapter._borrowed_api_stores
     require((os.getpid(),threading.get_ident()) == bundle._actor, 'borrowed_actor')
@@ -186,6 +192,8 @@ async def disconnect_borrowed(adapter):
     require_owner_loop(bundle)
     if bundle._stage == 'DETACHED':
         return
+    from gateway.platforms.api_server_borrowed_transport import require_transport_retired
+    require_transport_retired(bundle)
     bundle._check()
     if bundle._prepared_binding is not None:
         require(bundle._prepared_binding._stage in ('PREPARED', 'DRAINED'),
